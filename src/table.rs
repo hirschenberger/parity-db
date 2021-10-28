@@ -374,7 +374,8 @@ impl ValueTable {
 			if filled == 0 {
 				filled = 1;
 			}
-			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}", id, filled, entry_size);
+			log::debug!(target: "parity-db", "Opened value table {} with {} entries, entry_size={}, last_removed={}",
+				id, filled, entry_size, last_removed);
 		}
 
 		Ok(ValueTable {
@@ -537,6 +538,8 @@ impl ValueTable {
 	}
 
 	pub fn get(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(Value, bool)>> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let mut result = Vec::new();
 		let (rc, _, compressed) = self.for_parts(Some(key), index, log, |buf| result.extend_from_slice(buf))?;
 		if rc > 0 {
@@ -546,6 +549,8 @@ impl ValueTable {
 	}
 
 	pub fn get_with_meta(&self, index: u64, log: &impl LogQuery) -> Result<Option<(Value, u32, [u8; PARTIAL_SIZE], bool)>> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let mut result = Vec::new();
 		let (rc, pkey, compressed) = self.for_parts(None, index, log, |buf| result.extend_from_slice(buf))?;
 		if rc > 0 {
@@ -556,6 +561,8 @@ impl ValueTable {
 
 
 	pub fn size(&self, key: &Key, index: u64, log: &impl LogQuery) -> Result<Option<(u32, bool)>> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let mut result = 0;
 		let (rc, _, compressed) = self.for_parts(Some(key), index, log, |buf| result += buf.len() as u32)? ;
 		if rc > 0 {
@@ -572,6 +579,8 @@ impl ValueTable {
 	}
 
 	pub fn partial_key_at<Q: LogQuery>(&self, index: u64, log: &Q) -> Result<Option<[u8; PARTIAL_SIZE]>> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let mut buf = PartialKeyEntry::new_uninit();
 		let mut result = [0u8; PARTIAL_SIZE];
 		let buf = if log.value(self.id, index, buf.as_mut()) {
@@ -596,16 +605,32 @@ impl ValueTable {
 	}
 
 	pub fn read_next_free(&self, index: u64, log: &LogWriter) -> Result<u64> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let mut buf = PartialEntry::new_uninit();
+		log::trace!(
+			target: "parity-db",
+			"{}: Reading next free at {}, last_removed = {:?}", self.id, index, self.last_removed
+		);
 		if !log.value(self.id, index, buf.as_mut()) {
 			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
 		}
+		log::trace!(
+			target: "parity-db",
+			"{}: Reading next free at {}, buf = {:?}", self.id, index, hex(&buf.1)
+		);
 		buf.skip_size();
 		let next = buf.read_next();
+		log::trace!(
+			target: "parity-db",
+			"{}: Read next free at {} = {:?}", self.id, index, next,
+		);
 		return Ok(next);
 	}
 
 	pub fn read_next_part(&self, index: u64, log: &LogWriter) -> Result<Option<u64>> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let mut buf = PartialEntry::new_uninit();
 		if !log.value(self.id, index, buf.as_mut()) {
 			self.read_at(buf.as_mut(), index * self.entry_size as u64)?;
@@ -630,6 +655,7 @@ impl ValueTable {
 				last_removed,
 			);
 			self.last_removed.store(next_removed, Ordering::Relaxed);
+			assert!(self.last_removed.load(Ordering::Relaxed) <= self.filled.load(Ordering::Relaxed));
 			last_removed
 		} else {
 			log::trace!(
@@ -721,6 +747,8 @@ impl ValueTable {
 	}
 
 	fn clear_chain(&self, mut index: u64, log: &mut LogWriter) -> Result<()> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		loop {
 			match self.read_next_part(index, log)? {
 				Some(next) => {
@@ -736,6 +764,8 @@ impl ValueTable {
 	}
 
 	fn clear_slot(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let last_removed = self.last_removed.load(Ordering::Relaxed);
 		log::trace!(
 			target: "parity-db",
@@ -773,11 +803,15 @@ impl ValueTable {
 	}
 
 	pub fn write_inc_ref(&self, index: u64, log: &mut LogWriter) -> Result<()> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		self.change_ref(index, 1, log)?;
 		Ok(())
 	}
 
 	pub fn write_dec_ref(&self, index: u64, log: &mut LogWriter) -> Result<bool> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		if self.change_ref(index, -1, log)? {
 			return Ok(true);
 		}
@@ -786,6 +820,8 @@ impl ValueTable {
 	}
 
 	pub fn change_ref(&self, index: u64, delta: i32, log: &mut LogWriter) -> Result<bool> {
+		assert!(index > 0);
+		assert!(index <= self.filled.load(Ordering::Relaxed));
 		let mut buf = FullEntry::new_uninit();
 		let buf = if log.value(self.id, index, buf.as_mut()) {
 			&mut buf
@@ -901,6 +937,7 @@ impl ValueTable {
 		}
 		self.last_removed.store(last_removed, Ordering::Relaxed);
 		self.filled.store(filled, Ordering::Relaxed);
+		assert!(self.last_removed.load(Ordering::Relaxed) <= self.filled.load(Ordering::Relaxed));
 		Ok(())
 	}
 
